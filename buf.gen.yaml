@@ -1,0 +1,6 @@
+version: v2
+plugins:
+  - local: protoc-gen-go
+    out: schemes/aos/protocol
+    opt:
+      - module=github.com/tuneinsight/lattigo/v6/schemes/aos/protocol

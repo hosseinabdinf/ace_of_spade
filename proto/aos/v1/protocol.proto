@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package aos.v1;
+
+option go_package = "github.com/tuneinsight/lattigo/v6/schemes/aos/protocol/pb;protocolpb";
+
+// Envelope is a signed protocol message. Signature covers timestamp, nonce,
+// and payload according to the protocol package's envelope domain separation.
+message Envelope {
+  int64 timestamp_unix_nano = 1;
+  bytes nonce = 2;
+  bytes payload = 3;
+  bytes sender_ed25519 = 4;
+  bytes signature = 5;
+}
+
+// Box is X25519/XChaCha20-Poly1305 protected delivery material.
+message Box {
+  bytes ephemeral_x25519_public = 1;
+  bytes nonce = 2;
+  bytes ciphertext = 3;
+}
+
+message OwnerRegistrationRequest {
+  string owner_id = 1;
+  Envelope envelope = 2;
+}
+
+message UserRegistrationRequest {
+  string user_id = 1;
+  Envelope envelope = 2;
+}
+
+message StoreCiphertextRequest {
+  string owner_id = 1;
+  Envelope envelope = 2;
+  bytes ciphertext = 3;
+}
+
+message FunctionalKeyRequest {
+  string user_id = 1;
+  Envelope envelope = 2;
+  uint64 target = 3;
+}
+
+message FunctionalKeyDelivery {
+  Box functional_key = 1;
+  repeated bytes ciphertexts = 2;
+}
