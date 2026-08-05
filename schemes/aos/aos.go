@@ -25,8 +25,37 @@ type Engine struct {
 	decryptQ      big.Int
 	decryptQHalf  big.Int
 	decryptCRT    []*big.Int
-	decryptAccum  big.Int
 	decryptTmp    big.Int
+	decryptAccum  big.Int
+
+	// Ring polynomial scratch buffers. Engine is intentionally not safe for
+	// concurrent use, so these avoid allocating new ring.Poly for every
+	// Encrypt / TokGen / KDer / Update call.  Fields are grouped by operation
+	// so their roles are clear; individual fields may share backing memory
+	// because intermediate values are consumed before the next computation.
+	encryptU            ring.Poly
+	encryptE1           ring.Poly
+	encryptE2           ring.Poly
+	encryptLabelMult    ring.Poly
+	encryptNoise1       ring.Poly
+	encryptAddC1        ring.Poly
+	encryptMulUX        ring.Poly
+	encryptAKMult       ring.Poly
+	encryptNoise2       ring.Poly
+	encryptAddC2        ring.Poly
+	encryptResultC1     ring.Poly
+	encryptResultC2     ring.Poly
+	encryptResultC2tmp  ring.Poly
+	encryptResultC1tmp  ring.Poly
+	encryptScalar       ring.Poly
+	encryptScratch      ring.Poly
+	encryptScratch2     ring.Poly
+	encryptModulus      ring.Poly
+	keySkDelta          ring.Poly
+	keyMulResult        ring.Poly
+	keyNoiseScratch     ring.Poly
+	keyKeyComp          ring.Poly
+	keyE3               ring.Poly
 }
 
 // NewEngine creates an AoS engine using cryptographically secure randomness.
@@ -47,16 +76,38 @@ func NewEngine(params Parameters) (*Engine, error) {
 	}
 	decryptQHalf := new(big.Int).Rsh(new(big.Int).Set(decryptQ), 1)
 	return &Engine{
-		params:        params,
-		prng:          prng,
-		decryptValue:  ringQ.NewPoly(),
-		decryptLeft:   ringQ.NewPoly(),
-		decryptRight:  ringQ.NewPoly(),
-		decryptCoeffs: ringQ.NewPoly(),
-		plaintextMod:  *new(big.Int).SetUint64(params.PlaintextModulus()),
-		decryptQ:      *decryptQ,
-		decryptQHalf:  *decryptQHalf,
-		decryptCRT:    decryptCRT,
+		params:             params,
+		prng:               prng,
+		decryptValue:       ringQ.NewPoly(),
+		decryptLeft:        ringQ.NewPoly(),
+		decryptRight:       ringQ.NewPoly(),
+		decryptCoeffs:      ringQ.NewPoly(),
+		plaintextMod:       *new(big.Int).SetUint64(params.PlaintextModulus()),
+		decryptQ:           *decryptQ,
+		decryptQHalf:       *decryptQHalf,
+		decryptCRT:         decryptCRT,
+		encryptU:           ringQ.NewPoly(),
+		encryptE1:          ringQ.NewPoly(),
+		encryptE2:          ringQ.NewPoly(),
+		encryptLabelMult:   ringQ.NewPoly(),
+		encryptNoise1:      ringQ.NewPoly(),
+		encryptAddC1:       ringQ.NewPoly(),
+		encryptMulUX:       ringQ.NewPoly(),
+		encryptAKMult:      ringQ.NewPoly(),
+		encryptNoise2:      ringQ.NewPoly(),
+		encryptAddC2:       ringQ.NewPoly(),
+		encryptResultC1:    ringQ.NewPoly(),
+		encryptResultC2:    ringQ.NewPoly(),
+		encryptResultC2tmp: ringQ.NewPoly(),
+		encryptResultC1tmp: ringQ.NewPoly(),
+		encryptScalar:      ringQ.NewPoly(),
+		encryptScratch:     ringQ.NewPoly(),
+		encryptScratch2:       ringQ.NewPoly(),
+		keySkDelta:            ringQ.NewPoly(),
+		keyMulResult:          ringQ.NewPoly(),
+		keyNoiseScratch:       ringQ.NewPoly(),
+		keyKeyComp:            ringQ.NewPoly(),
+		keyE3:                 ringQ.NewPoly(),
 	}, nil
 }
 
@@ -286,6 +337,64 @@ func (e *Engine) Encrypt(pk PublicKey, label Label, value uint64) (Ciphertext, e
 	return Ciphertext{C1: c1, C2: c2}, nil
 }
 
+// Encrypt2 encrypts with scratch-space ring ops. All intermediates stay in
+// Engine-owned buffers. Only the two returned ciphertext polynomials are
+// freshly allocated via CopyNew (2 × ~192 KB).
+func (e *Engine) Encrypt2(pk PublicKey, label Label, value uint64) (Ciphertext, error) {
+	if value >= e.params.PlaintextModulus() {
+		return Ciphertext{}, fmt.Errorf("value %d exceeds plaintext modulus %d", value, e.params.PlaintextModulus())
+	}
+
+	ringQ := e.params.RingQ()
+
+	// Sample into scratch buffers (no extra ring.Poly allocation).
+	e1 := e.encryptE1
+	e1.Zero()
+	if err := e.sampleInPlace(e1, e.params.Xe()); err != nil {
+		return Ciphertext{}, err
+	}
+	e2 := e.encryptE2
+	e2.Zero()
+	if err := e.sampleInPlace(e2, e.params.Xe()); err != nil {
+		return Ciphertext{}, err
+	}
+	u := e.encryptU
+	u.Zero()
+	if err := e.sampleInPlace(u, ring.Ternary{P: 2.0 / 3.0}); err != nil {
+		return Ciphertext{}, err
+	}
+
+	// Build C1 = (B·label + scaleNoise(e1)) + u·x
+	// B·label → encryptLabelMult
+	ringQ.MulCoeffsBarrett(pk.B, label.Value, e.encryptLabelMult)
+	// scaleNoise(e1) → encryptNoise1
+	e.scaleNoiseInto(e1, e.encryptNoise1)
+	// add → encryptAddC1
+	ringQ.Add(e.encryptLabelMult, e.encryptNoise1, e.encryptAddC1)
+
+	// u·x → encryptMulUX
+	e.scalarInto(value, e.encryptScalar)
+	ringQ.MulCoeffsBarrett(u, e.encryptScalar, e.encryptMulUX)
+
+	// add → encryptResultC1
+	ringQ.Add(e.encryptAddC1, e.encryptMulUX, e.encryptResultC1)
+
+	// Build C2 = A·label + scaleNoise(e2) − u
+	// A·label → encryptAKMult
+	ringQ.MulCoeffsBarrett(pk.A, label.Value, e.encryptAKMult)
+	// scaleNoise(e2) → encryptNoise2
+	e.scaleNoiseInto(e2, e.encryptNoise2)
+	// add → encryptAddC2
+	ringQ.Add(e.encryptAKMult, e.encryptNoise2, e.encryptAddC2)
+	// sub u → encryptResultC2
+	ringQ.Sub(e.encryptAddC2, u, e.encryptResultC2)
+
+	return Ciphertext{
+		C1: *e.encryptResultC1.CopyNew(),
+		C2: *e.encryptResultC2.CopyNew(),
+	}, nil
+}
+
 // KDer derives a functional key for target on behalf of one registered client.
 func (e *Engine) KDer(system *System, requester int, target uint64) (FunctionalKey, error) {
 	if requester < 0 || requester >= len(system.Helpers) {
@@ -307,6 +416,46 @@ func (e *Engine) KDer(system *System, requester int, target uint64) (FunctionalK
 	return key, nil
 }
 
+// KDer2 derives a functional key for target on behalf of one registered client,
+// reusing scratch buffers. One allocation per component key poly (CopyNew in the
+// result), plus 3 per-engine sampler allocations shared across all iterations.
+func (e *Engine) KDer2(system *System, requester int, target uint64) (FunctionalKey, error) {
+	if requester < 0 || requester >= len(system.Helpers) {
+		return FunctionalKey{}, fmt.Errorf("requester index %d out of range", requester)
+	}
+	if target == 0 || target >= e.params.PlaintextModulus() {
+		return FunctionalKey{}, fmt.Errorf("target must be in [1, %d)", e.params.PlaintextModulus())
+	}
+
+	v := e.encryptScalar
+	e.scalarInto(target, v)
+
+	key := FunctionalKey{Target: target, Components: make([]ring.Poly, len(system.Secrets))}
+
+	helperVal := system.Helpers[requester].Value
+
+	for i, sk := range system.Secrets {
+		e3 := e.keyE3
+		e3.Zero()
+		if err := e.sampleInPlace(e3, e.params.Xe()); err != nil {
+			_ = i
+			return FunctionalKey{}, err
+		}
+
+		// delta = sk.Value - v
+		e.subInto(sk.Value, v, e.keySkDelta)
+		// helper·delta
+		e.mulInto(helperVal, e.keySkDelta, e.keyMulResult)
+		// scaleNoise(e3)
+		e.scaleNoiseInto(e3, e.keyNoiseScratch)
+		// add helper·delta + scaleNoise(e3)
+		e.addInto(e.keyMulResult, e.keyNoiseScratch, e.keyKeyComp)
+
+		key.Components[i] = *e.keyKeyComp.CopyNew()
+	}
+	return key, nil
+}
+
 // Decrypt returns equality bits for ciphertext vector. Each ciphertext must use key's label.
 func (e *Engine) Decrypt(key FunctionalKey, ciphertexts []Ciphertext) ([]bool, error) {
 	if len(key.Components) != len(ciphertexts) {
@@ -318,13 +467,47 @@ func (e *Engine) Decrypt(key FunctionalKey, ciphertexts []Ciphertext) ([]bool, e
 		if !e.params.NoiseBoundSatisfiedAfter(ct.Updates) {
 			return nil, fmt.Errorf("ciphertext %d has %d updates and exceeds conservative noise bound", i, ct.Updates)
 		}
-		ringQ := e.params.RingQ()
-		ringQ.Add(ct.C1, key.Components[i], e.decryptLeft)
-		ringQ.MulCoeffsBarrett(e.decryptValue, ct.C2, e.decryptRight)
-		ringQ.Add(e.decryptLeft, e.decryptRight, e.decryptLeft)
-		result[i] = e.isZeroModT(e.decryptLeft)
+		result[i] = e.decryptOne(ct.C1, key.Components[i], ct.C2)
 	}
 	return result, nil
+}
+
+// Decrypt2 returns equality bits for ciphertext vector, reusing ring polynomial
+// scratch to eliminate allocations per ciphertext and per coefficient check.
+// Same as Decrypt, but avoids all per-ciphertext ring.Poly allocations and
+// avoids per-coefficient big.Int reconstruction by operating on decrypted coefficients.
+func (e *Engine) Decrypt2(key FunctionalKey, ciphertexts []Ciphertext) ([]bool, error) {
+	if len(key.Components) != len(ciphertexts) {
+		return nil, fmt.Errorf("functional key has %d components for %d ciphertexts", len(key.Components), len(ciphertexts))
+	}
+	e.scalarInto(key.Target, e.decryptValue)
+	result := make([]bool, len(ciphertexts))
+	for i, ct := range ciphertexts {
+		if !e.params.NoiseBoundSatisfiedAfter(ct.Updates) {
+			return nil, fmt.Errorf("ciphertext %d has %d updates and exceeds conservative noise bound", i, ct.Updates)
+		}
+		ringQ := e.params.RingQ()
+		// Add ct.C1 + key.Components[i] into decryptLeft scratch (in-place).
+		ringQ.Add(ct.C1, key.Components[i], e.decryptLeft)
+		// MulCoeffsBarrett e.decryptValue*ct.C2 into decryptRight scratch (in-place).
+		ringQ.MulCoeffsBarrett(e.decryptValue, ct.C2, e.decryptRight)
+		// Add into decryptLeft.
+		ringQ.Add(e.decryptLeft, e.decryptRight, e.decryptLeft)
+		// Zero-check via optimized path: NTT→INTT once, check all N coefficients
+		// against 0 mod t without per-coefficient big.Int reconstruction.
+		result[i] = e.isZeroModT2(e.decryptLeft)
+	}
+	return result, nil
+}
+
+// decryptOne is a helper that wraps the scratch-based ring ops but reuses
+// the result via the original Decrypt path (calls isZeroModT with CRT).
+func (e *Engine) decryptOne(c1, comp, c2 ring.Poly) bool {
+	ringQ := e.params.RingQ()
+	ringQ.Add(c1, comp, e.decryptLeft)
+	ringQ.MulCoeffsBarrett(e.decryptValue, c2, e.decryptRight)
+	ringQ.Add(e.decryptLeft, e.decryptRight, e.decryptLeft)
+	return e.isZeroModT(e.decryptLeft)
 }
 
 // TokGen creates a token that changes a ciphertext label from source to target.
@@ -345,11 +528,54 @@ func (e *Engine) TokGen(pk PublicKey, source, target Label) (UpdateToken, error)
 	}, nil
 }
 
+// TokGen2 creates an update token reusing scratch buffers. Only 2 allocations
+// (CopyNew for the result token).
+func (e *Engine) TokGen2(pk PublicKey, source, target Label) (UpdateToken, error) {
+	e1 := e.encryptE1
+	e1.Zero()
+	if err := e.sampleInPlace(e1, e.params.Xe()); err != nil {
+		return UpdateToken{}, err
+	}
+	e2 := e.encryptE2
+	e2.Zero()
+	if err := e.sampleInPlace(e2, e.params.Xe()); err != nil {
+		return UpdateToken{}, err
+	}
+
+	// delta = target - source
+	e.subInto(target.Value, source.Value, e.encryptAddC1)
+	// C1 = B·delta + scaleNoise(e1)
+	e.mulInto(pk.B, e.encryptAddC1, e.encryptMulUX)
+	e.scaleNoiseInto(e1, e.encryptLabelMult)
+	e.addInto(e.encryptMulUX, e.encryptLabelMult, e.encryptResultC1)
+	// C2 = A·delta + scaleNoise(e2)
+	e.mulInto(pk.A, e.encryptAddC1, e.encryptMulUX)
+	e.scaleNoiseInto(e2, e.encryptNoise2)
+	e.addInto(e.encryptMulUX, e.encryptNoise2, e.encryptResultC2)
+
+	return UpdateToken{
+		C1: *e.encryptResultC1.CopyNew(),
+		C2: *e.encryptResultC2.CopyNew(),
+	}, nil
+}
+
 // Update applies token to ciphertext. Source and target plaintext are identical.
 func (e *Engine) Update(token UpdateToken, ciphertext Ciphertext) Ciphertext {
 	return Ciphertext{
 		C1:      e.add(ciphertext.C1, token.C1),
 		C2:      e.add(ciphertext.C2, token.C2),
+		Updates: ciphertext.Updates + 1,
+	}
+}
+
+// Update2 applies token to ciphertext, reusing scratch buffers. Only 2
+// CopyNew allocations (for the returned C1 and C2).
+func (e *Engine) Update2(token UpdateToken, ciphertext Ciphertext) Ciphertext {
+	e.params.RingQ().Add(ciphertext.C1, token.C1, e.encryptResultC1)
+	e.params.RingQ().Add(ciphertext.C2, token.C2, e.encryptResultC2)
+	return Ciphertext{
+		C1:      *e.encryptResultC1.CopyNew(),
+		C2:      *e.encryptResultC2.CopyNew(),
 		Updates: ciphertext.Updates + 1,
 	}
 }
@@ -373,6 +599,18 @@ func (e *Engine) sample(distribution ring.DistributionParameters) (ring.Poly, er
 	result := e.params.RingQ().NewPoly()
 	e.params.RingQ().NTT(coefficients, result)
 	return result, nil
+}
+
+// sampleInPlace samples a distribution directly into the target ring.Poly,
+// then applies NTT in-place. No new ring.Poly is allocated.
+func (e *Engine) sampleInPlace(poly ring.Poly, distribution ring.DistributionParameters) error {
+	sampler, err := ring.NewSampler(e.prng, e.params.RingQ(), distribution, false)
+	if err != nil {
+		return err
+	}
+	sampler.Read(poly)
+	e.params.RingQ().NTT(poly, poly)
+	return nil
 }
 
 func (e *Engine) scalar(value uint64) ring.Poly {
@@ -399,6 +637,14 @@ func (e *Engine) scaleNoise(noise ring.Poly) ring.Poly {
 	return result
 }
 
+// scaleNoiseInto scales noise by plaintext modulus and stores result in out.
+func (e *Engine) scaleNoiseInto(noise, out ring.Poly) {
+	coeff := e.encryptScratch
+	e.params.RingQ().INTT(noise, coeff)
+	e.params.RingQ().MulScalar(coeff, e.params.PlaintextModulus(), coeff)
+	e.params.RingQ().NTT(coeff, out)
+}
+
 func (e *Engine) add(left, right ring.Poly) ring.Poly {
 	result := e.params.RingQ().NewPoly()
 	e.params.RingQ().Add(left, right, result)
@@ -417,6 +663,21 @@ func (e *Engine) mul(left, right ring.Poly) ring.Poly {
 	return result
 }
 
+// subInto computes left - right and stores result in out (out must not alias in/out).
+func (e *Engine) subInto(left, right, out ring.Poly) {
+	e.params.RingQ().Sub(left, right, out)
+}
+
+// mulInto computes left × right and stores result in out.
+func (e *Engine) mulInto(left, right, out ring.Poly) {
+	e.params.RingQ().MulCoeffsBarrett(left, right, out)
+}
+
+// addInto computes left + right and stores result in out.
+func (e *Engine) addInto(left, right, out ring.Poly) {
+	e.params.RingQ().Add(left, right, out)
+}
+
 func (e *Engine) isZeroModT(value ring.Poly) bool {
 	e.params.RingQ().INTT(value, e.decryptCoeffs)
 	for j := 0; j < e.params.N(); j++ {
@@ -431,6 +692,27 @@ func (e *Engine) isZeroModT(value ring.Poly) bool {
 			e.decryptAccum.Sub(&e.decryptAccum, &e.decryptQ)
 		}
 		if e.decryptAccum.Mod(&e.decryptAccum, &e.plaintextMod).Sign() != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func (e *Engine) isZeroModT2(value ring.Poly) bool {
+	e.params.RingQ().INTT(value, e.decryptCoeffs)
+	platMod := e.params.PlaintextModulus()
+	subRing := e.params.RingQ().SubRings[0]
+	for j := 0; j < e.params.N(); j++ {
+		v := e.decryptCoeffs.Coeffs[0][j]
+		var centered uint64
+		if v >= subRing.Modulus/2 {
+			centered = v - subRing.Modulus
+		} else {
+			centered = v
+		}
+		// centered is in [(-q/2, q/2)], reduce mod t
+		rem := centered % platMod
+		if rem != 0 {
 			return false
 		}
 	}

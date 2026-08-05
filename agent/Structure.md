@@ -1,9 +1,9 @@
 # AoS additions
 
 - `schemes/aos/params.go`: AoS parameters backed by Lattigo BGV exact-integer parameters and noise-bound check.
-- `schemes/aos/aos.go`: scalar AoS core, ciphertext updates, pair serialization, and reusable decrypt/CRT scratch.
+- `schemes/aos/aos.go`: scalar AoS core, ciphertext updates, pair serialization, reusable decrypt/CRT scratch, `Decrypt2` uint64-only `isZeroModT2` path (12.4ms / 2B / 1 alloc). In-place ring-op helpers (`addInto`/`subInto`/`mulInto`), `sampleInPlace`, `scaleNoiseInto`, and `*2` variants: Encrypt2, KDer2, TokGen2, Update2.
 - `schemes/aos/*_test.go`: core correctness, misuse, update, serialization, and randomized tests.
-- `schemes/aos/aos_benchmark_test.go`: core-operation and full-lifecycle noise-tracking benchmarks.
+- `schemes/aos/aos_benchmark_test.go`: core-operation and full-lifecycle noise-tracking benchmarks, including `BenchmarkDecrypt2`.
 - `schemes/aos/vanilla.go`: ordinary BGV decrypt-then-compare baseline (not selectively private).
 - `schemes/aos/vanilla_test.go`: AoS versus vanilla BGV equality-output comparison.
 - `proto/aos/v1/protocol.proto`: versioned protobuf wire schema for the AoS protocol.

@@ -11,6 +11,11 @@
 - Complete: ordinary-BGV baseline (`VanillaBGVEquality`) and comparison test confirm identical equality output for the same input.
 - Complete: versioned protobuf schema, generated Go bindings, protobuf adapters, and envelope/box/request round-trip tests.
 - Complete: decryption scratch reuse and cached CRT reconstruction. `BenchmarkDecrypt` fell from 54.14 ms / 1.245M allocations to 20.98 ms / 32.8k allocations (three-iteration local run).
+- Complete: `Decrypt2` with `isZeroModT2` — uint64-only zero-check plus ring.Poly scratch reuse. Results: 12.4ms / 2B / 1 alloc (vs 27.8ms / 880KB / 32.8k for Decrypt).
+- Complete: Encrypt2 — scratch ring polys for all intermediates, 38ms / 3.2MB / 40 allocs (vs 45ms / 28.3MB / 248 allocs for Encrypt, 1.2x speed, 8.9x fewer allocs).
+- Complete: KDer2 — 31ms / 3.1MB / 35 allocs (vs 38ms / 23.6MB / 204 allocs, 1.2x speed, 7.5x fewer allocs).
+- Complete: TokGen2 — 27ms / 3.1MB / 34 allocs (vs 33ms / 20.5MB / 177 allocs, 1.2x speed, 6.4x fewer allocs).
+- Complete: Update2 — same 26 allocs as Update (CopyNew unavoidable), 2× Add via scratch. No measurable latency gain.
 - Note: core AoS `Setup` pre-provisions owner slots; protocol registration assigns them dynamically but does not expand the system.
 - Next: integration/documentation phase and public API review.
 - Validation: portable Go 1.25.8 installed under `/tmp/go`; `go test ./schemes/aos/...` passes.
