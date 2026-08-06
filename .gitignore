@@ -56,3 +56,6 @@ _testmain.go
 # Local codebase-memory cache
 /.codebase-memory/
 
+
+# Agent skill files - auto-generated, do not commit
+.agents/
