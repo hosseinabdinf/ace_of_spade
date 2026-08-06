@@ -41,7 +41,8 @@ sequenceDiagram
     participant KC as Key Curator
     participant AOS as AoS Engine/System
 
-    Note over O,U: Each participant creates an Identity<br/>Ed25519 signing key + X25519 encryption key
+    Note over O,U: Each participant creates an Identity
+    Note over O,U: Identity has Ed25519 signing and X25519 encryption keys
     KC->>AOS: Setup(ownerCount)
     AOS-->>KC: System secrets, helpers, public keys, labels
     KC->>KC: NewCurator(engine, system, maxAge)
@@ -52,7 +53,7 @@ sequenceDiagram
     KC->>KC: Assign pre-provisioned owner slot
     KC->>KC: Seal(slot label, owner's X25519 public key)
     KC-->>O: PublicKey + encrypted label Box
-    O->>O: Open Box; keep label private
+    O->>O: Open Box and keep label private
 
     U->>U: SignEnvelope(user registration)
     U->>KC: RegisterUser(userID, signed envelope)
@@ -76,7 +77,7 @@ sequenceDiagram
     KC->>KC: Require ciphertext in every owner slot
     KC->>AOS: KDer(system, slot 0, target)
     AOS-->>KC: Functional key
-    KC->>KC: Marshal key; Seal to user's X25519 public key
+    KC->>KC: Marshal key and seal to user's X25519 public key
     KC-->>U: Encrypted functional-key Box + ciphertext vector
     U->>U: Open Box; unmarshal FunctionalKey
     U->>AOS: Decrypt(functional key, ciphertext vector)
