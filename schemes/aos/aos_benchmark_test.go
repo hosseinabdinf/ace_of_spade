@@ -64,12 +64,34 @@ func BenchmarkEncrypt(b *testing.B) {
 	}
 }
 
+func BenchmarkEncrypt2(b *testing.B) {
+	engine, system, _, _, _ := benchmarkContext(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := engine.Encrypt2(system.Public[0], system.Labels[0], 42); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkKDer(b *testing.B) {
 	engine, system, _, _, _ := benchmarkContext(b)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if _, err := engine.KDer(system, 0, 42); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkKDer2(b *testing.B) {
+	engine, system, _, _, _ := benchmarkContext(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := engine.KDer2(system, 0, 42); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -86,6 +108,17 @@ func BenchmarkDecrypt(b *testing.B) {
 	}
 }
 
+func BenchmarkDecrypt2(b *testing.B) {
+	engine, _, ciphertexts, key, _ := benchmarkContext(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := engine.Decrypt2(key, ciphertexts); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkTokGen(b *testing.B) {
 	engine, system, _, _, _ := benchmarkContext(b)
 	b.ReportAllocs()
@@ -97,12 +130,32 @@ func BenchmarkTokGen(b *testing.B) {
 	}
 }
 
+func BenchmarkTokGen2(b *testing.B) {
+	engine, system, _, _, _ := benchmarkContext(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := engine.TokGen2(system.Public[0], system.Labels[0], system.Labels[1]); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkUpdate(b *testing.B) {
 	engine, _, ciphertexts, _, token := benchmarkContext(b)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = engine.Update(token, ciphertexts[0])
+	}
+}
+
+func BenchmarkUpdate2(b *testing.B) {
+	engine, _, ciphertexts, _, token := benchmarkContext(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = engine.Update2(token, ciphertexts[0])
 	}
 }
 
